@@ -41,7 +41,6 @@ export class TotalsService {
     for (const o of rows) {
       // Смещение - на момент заказа, а не на сейчас: иначе после перехода на летнее/зимнее время
       // заказы около полуночи уезжают в соседний день.
-      // shortcut: Intl.DateTimeFormat на каждый заказ, при тысячах заказов за запрос - кэшировать форматтер
       const date = dateAtOffset(o.createdAt, tzOffsetMinutes(timezone, o.createdAt));
       const day = sums.get(date);
       if (!day) continue;
