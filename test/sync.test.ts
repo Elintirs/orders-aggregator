@@ -17,6 +17,14 @@ describe("POST /sync", () => {
     expect(rows[0].n).toBe(3);
   });
 
+  it("пишет полную статистику прогона в sync_runs", async () => {
+    const o = apiOrder();
+    ctx.api.pages.set(null, { items: [o, o, { id: "broken" }], nextCursor: null });
+    await ctx.app.inject({ method: "POST", url: "/sync" });
+    const { rows } = await ctx.db.query(`SELECT pages, received, applied, stale, invalid, error FROM sync_runs`);
+    expect(rows).toEqual([{ pages: 1, received: 3, applied: 1, stale: 1, invalid: 1, error: null }]);
+  });
+
   it("невалидные заказы пропускает, а не падает", async () => {
     ctx.api.pages.set(null, { items: [apiOrder(), { id: "broken" }, apiOrder({ amount: "abc" })], nextCursor: null });
     const res = await ctx.app.inject({ method: "POST", url: "/sync" });
