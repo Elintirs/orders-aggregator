@@ -13,9 +13,9 @@ describe("GET /customers/:id/daily-totals", () => {
     const res = await dailyTotals(ctx.app, "c_1", "2026-02-09", "2026-02-11");
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual([
-      { date: "2026-02-09", total: 0 },
-      { date: "2026-02-10", total: 1000 },
-      { date: "2026-02-11", total: 349 },
+      { date: "2026-02-09", total: 0, gross: 0, discount: 0, net: 0 },
+      { date: "2026-02-10", total: 1000, gross: 1000, discount: 0, net: 1000 },
+      { date: "2026-02-11", total: 349, gross: 349, discount: 0, net: 349 },
     ]);
   });
 
@@ -24,7 +24,7 @@ describe("GET /customers/:id/daily-totals", () => {
     await postWebhook(ctx.app, apiOrder({ amount: 700, status: "pending" }));
     await postWebhook(ctx.app, apiOrder({ amount: 900, status: "refunded" }));
     const res = await dailyTotals(ctx.app, "c_1", "2026-02-10", "2026-02-10");
-    expect(res.json()).toEqual([{ date: "2026-02-10", total: 500 }]);
+    expect(res.json()).toEqual([{ date: "2026-02-10", total: 500, gross: 500, discount: 0, net: 500 }]);
   });
 
   it("учитывает только заказы этого клиента", async () => {
@@ -32,7 +32,7 @@ describe("GET /customers/:id/daily-totals", () => {
     await postWebhook(ctx.app, apiOrder({ amount: 500 }));
     await postWebhook(ctx.app, apiOrder({ amount: 800, customerId: "c_2" }));
     const res = await dailyTotals(ctx.app, "c_2", "2026-02-10", "2026-02-10");
-    expect(res.json()).toEqual([{ date: "2026-02-10", total: 800 }]);
+    expect(res.json()).toEqual([{ date: "2026-02-10", total: 800, gross: 800, discount: 0, net: 800 }]);
   });
 
   it("таймзона клиента берётся из API один раз", async () => {
@@ -51,5 +51,47 @@ describe("GET /customers/:id/daily-totals", () => {
   it("неизвестный клиент — 404", async () => {
     const res = await dailyTotals(ctx.app, "nobody", "2026-02-10", "2026-02-10");
     expect(res.statusCode).toBe(404);
+  });
+
+  it("считает скидки: gross, net, discount", async () => {
+    await postWebhook(ctx.app, apiOrder({ amount: 2500, discountPercent: 16.5, amountPaid: 2087.5 }));
+    // 4549.23 * 100 в float = 454922.99999999994: копейка не должна теряться
+    await postWebhook(ctx.app, apiOrder({ amount: "5481.00", discountPercent: "17", amountPaid: 4549.23 }));
+    // заказ до появления скидок в API: заплачено столько же, сколько стоит
+    await postWebhook(ctx.app, apiOrder({ amount: 1000 }));
+    // скидка у неоплаченного не считается
+    await postWebhook(ctx.app, apiOrder({ amount: 700, amountPaid: 350, status: "pending" }));
+
+    const res = await dailyTotals(ctx.app, "c_1", "2026-02-10", "2026-02-10");
+    expect(res.json()).toEqual([{ date: "2026-02-10", total: 8981, gross: 8981, discount: 1344.27, net: 7636.73 }]);
+  });
+
+  it("вебхук с новой скидкой меняет net", async () => {
+    const o = apiOrder({ amount: 1000, discountPercent: 0, amountPaid: 1000 });
+    await postWebhook(ctx.app, o);
+    await postWebhook(ctx.app, { ...o, discountPercent: 10, amountPaid: 900, updatedAt: "2026-02-10T13:00:00Z" });
+    const res = await dailyTotals(ctx.app, "c_1", "2026-02-10", "2026-02-10");
+    expect(res.json()).toEqual([{ date: "2026-02-10", total: 1000, gross: 1000, discount: 100, net: 900 }]);
+  });
+
+  it("день считается по смещению таймзоны на момент заказа, а не на сейчас (переход на летнее время)", async () => {
+    // Europe/Berlin: до 29.03.2026 UTC+1, после UTC+2. При любой текущей дате одно из смещений было бы неверным
+    ctx.api.customers.set("c_7", "Europe/Berlin");
+    await postWebhook(ctx.app, apiOrder({ customerId: "c_7", amount: 100, createdAt: "2026-03-27T22:30:00Z" })); // 27.03 23:30 CET
+    await postWebhook(ctx.app, apiOrder({ customerId: "c_7", amount: 200, createdAt: "2026-03-29T22:30:00Z" })); // 30.03 00:30 CEST
+    await postWebhook(ctx.app, apiOrder({ customerId: "c_7", amount: 400, createdAt: "2026-03-29T00:30:00Z" })); // 29.03 01:30 CET, за полчаса до перехода
+
+    const res = await dailyTotals(ctx.app, "c_7", "2026-03-27", "2026-03-30");
+    expect(res.json().map((d: { date: string; total: number }) => [d.date, d.total])).toEqual([
+      ["2026-03-27", 100],
+      ["2026-03-28", 0],
+      ["2026-03-29", 400],
+      ["2026-03-30", 200],
+    ]);
+  });
+
+  it("невалидный amountPaid (больше суммы заказа) — 400", async () => {
+    const res = await postWebhook(ctx.app, apiOrder({ amount: 100, amountPaid: 150 }));
+    expect(res.statusCode).toBe(400);
   });
 });
