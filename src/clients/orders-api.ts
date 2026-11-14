@@ -86,7 +86,11 @@ export class HttpOrdersApi implements OrdersApi {
       if (!res.ok) throw new UpstreamError(`${url.pathname}: HTTP ${res.status}`);
       const body = (await res.json()) as unknown;
       if (body && typeof body === "object" && "error" in body) {
-        // 200 с ошибкой в теле — на практике это тот же rate limit
+        // 200 с { error: "rate_limited" } - тот же rate limit. Прочие ошибки в теле не ретраим,
+        // иначе после 8 попыток причина теряется за "no successful response"
+        if (body.error !== "rate_limited") {
+          throw new UpstreamError(`${url.pathname}: error in 200 response: ${JSON.stringify(body).slice(0, 200)}`);
+        }
         this.nextSlot = Date.now() + 1000;
         continue;
       }
