@@ -9,6 +9,8 @@ const ExternalOrder = z.object({
   id: z.string().min(1),
   customerId: z.string().min(1),
   amount: z.union([z.number(), z.string()]),
+  // Появилось в API недавно: у старых заказов поля нет. discountPercent не храним, источник правды - amountPaid
+  amountPaid: z.union([z.number(), z.string()]).nullish(),
   status: z.enum(["pending", "paid", "refunded"]),
   createdAt: z.string(),
   updatedAt: z.string(),
@@ -24,10 +26,14 @@ export class OrdersService {
     if (!parsed.success) throw new ValidationError(`invalid order: ${parsed.error.issues.map((i) => i.path.join(".")).join(", ")}`);
     const o = parsed.data;
     try {
+      const amountKop = toKop(parseRub(o.amount));
+      const amountPaidKop = o.amountPaid == null ? null : toKop(parseRub(o.amountPaid));
+      if (amountPaidKop !== null && amountPaidKop > amountKop) throw new Error(`amountPaid > amount: ${o.amountPaid} > ${o.amount}`);
       return {
         id: o.id,
         customerId: o.customerId,
-        amountKop: toKop(parseRub(o.amount)),
+        amountKop,
+        amountPaidKop,
         status: o.status,
         createdAt: parseUtc(o.createdAt),
         updatedAt: parseUtc(o.updatedAt),
@@ -39,14 +45,10 @@ export class OrdersService {
 
   /**
    * Применяет версию заказа (из синка или вебхука).
-   * Вебхуки приходят с повторами и не по порядку, поэтому версию сохраняем,
-   * только если она новее уже сохранённой (по updatedAt).
+   * Вебхуки приходят с повторами, не по порядку и параллельно, поэтому версию сохраняем,
+   * только если она новее уже сохранённой (по updatedAt), атомарно в БД (см. OrdersRepository.saveIfNewer).
    */
-  async apply(raw: unknown): Promise<ApplyResult> {
-    const incoming = this.normalize(raw);
-    const current = await this.orders.get(incoming.id);
-    if (current && current.updatedAt.getTime() >= incoming.updatedAt.getTime()) return "stale";
-    await this.orders.save(incoming);
-    return current ? "updated" : "created";
+  apply(raw: unknown): Promise<ApplyResult> {
+    return this.orders.saveIfNewer(this.normalize(raw));
   }
 }

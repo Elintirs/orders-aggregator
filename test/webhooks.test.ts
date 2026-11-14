@@ -35,4 +35,19 @@ describe("POST /webhooks/order", () => {
     const res = await postWebhook(ctx.app, { id: "x" });
     expect(res.statusCode).toBe(400);
   });
+
+  it("параллельные вебхуки одного заказа: остаётся самая новая версия", async () => {
+    const o = apiOrder({ amount: 1000, amountPaid: 1000 });
+    await postWebhook(ctx.app, o);
+    const newer = { ...o, amountPaid: 670, updatedAt: "2026-02-10T14:00:00Z" };
+    const older = { ...o, amountPaid: 900, updatedAt: "2026-02-10T13:00:00Z" };
+    // как шлёт внешняя система: пачкой, с дублями и не по порядку
+    const batch = Array.from({ length: 10 }, (_, i) => (i % 2 ? older : newer));
+    for (let round = 0; round < 5; round++) {
+      await ctx.db.query(`UPDATE orders SET amount_paid_kop = 100000, updated_at = $2 WHERE id = $1`, [o.id, o.updatedAt]);
+      await Promise.all(batch.map((b) => postWebhook(ctx.app, b)));
+      const { rows } = await ctx.db.query(`SELECT amount_paid_kop FROM orders WHERE id = $1`, [o.id]);
+      expect(Number(rows[0].amount_paid_kop)).toBe(67000);
+    }
+  });
 });

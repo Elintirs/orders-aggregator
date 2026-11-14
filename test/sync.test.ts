@@ -42,4 +42,27 @@ describe("POST /sync", () => {
     expect(Number(rows[0].amount_kop)).toBe(250000);
     expect(rows[0].created_at.toISOString()).toBe("2026-02-10T21:30:00.000Z");
   });
+
+  it("дозаполняет amountPaid у заказов, сохранённых до появления скидок", async () => {
+    const o = apiOrder({ amount: 1000 });
+    await ctx.app.inject({ method: "POST", url: "/webhooks/order", payload: o });
+    // та же версия (updatedAt не менялся), но API теперь отдаёт amountPaid
+    ctx.api.pages.set(null, { items: [{ ...o, discountPercent: 10, amountPaid: 900 }], nextCursor: null });
+
+    const res = await ctx.app.inject({ method: "POST", url: "/sync" });
+    expect(res.json()).toMatchObject({ applied: 1, stale: 0 });
+    const { rows } = await ctx.db.query(`SELECT amount_paid_kop FROM orders WHERE id = $1`, [o.id]);
+    expect(Number(rows[0].amount_paid_kop)).toBe(90000);
+  });
+
+  it("дозаполнение не откатывает более свежую версию", async () => {
+    const o = apiOrder({ status: "refunded", updatedAt: "2026-02-12T00:00:00Z" });
+    await ctx.app.inject({ method: "POST", url: "/webhooks/order", payload: o });
+    ctx.api.pages.set(null, { items: [{ ...o, status: "paid", amountPaid: 900, updatedAt: "2026-02-10T12:00:00Z" }], nextCursor: null });
+
+    const res = await ctx.app.inject({ method: "POST", url: "/sync" });
+    expect(res.json()).toMatchObject({ stale: 1 });
+    const { rows } = await ctx.db.query(`SELECT status, amount_paid_kop FROM orders WHERE id = $1`, [o.id]);
+    expect(rows[0]).toEqual({ status: "refunded", amount_paid_kop: null });
+  });
 });
